@@ -1,0 +1,7 @@
+<Project>
+  <!-- Shared properties imported by projects -->
+  <PropertyGroup>
+    <SharedVersion>1.0.0</SharedVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

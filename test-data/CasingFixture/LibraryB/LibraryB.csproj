@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+
+  <!-- INTENTIONAL CASING ERROR: librarya should be LibraryA -->
+  <ItemGroup>
+    <ProjectReference Include="..\librarya\LibraryA.csproj" />
+  </ItemGroup>
+</Project>

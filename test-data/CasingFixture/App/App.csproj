@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- INTENTIONAL CASING ERROR: shared should be Shared -->
+  <Import Project="..\shared\Shared.props" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <!-- INTENTIONAL CASING ERRORS: librarya/libraryb should be LibraryA/LibraryB -->
+  <ItemGroup>
+    <ProjectReference Include="..\librarya\LibraryA.csproj" />
+    <ProjectReference Include="..\libraryb\LibraryB.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BinlogMcp.CasingAnalyzer/BinlogMcp.CasingAnalyzer.csproj" />
+    <Project Path="src/BinlogMcp.Client/BinlogMcp.Client.csproj" />
+    <Project Path="src/BinlogMcp.Visualization/BinlogMcp.Visualization.csproj" />
+    <Project Path="src/BinlogMcp/BinlogMcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BinlogMcp.Tests/BinlogMcp.Tests.csproj" />
+    <Project Path="tests/BinlogMcp.IntegrationTests/BinlogMcp.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
