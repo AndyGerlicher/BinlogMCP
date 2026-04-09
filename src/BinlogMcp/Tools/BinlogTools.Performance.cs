@@ -1,8 +1,6 @@
-using BinlogMcp.Formatting;
 using Microsoft.Build.Logging.StructuredLogger;
 using ModelContextProtocol.Server;
 using System.ComponentModel;
-using System.Text.Json;
 using MSBuildTask = Microsoft.Build.Logging.StructuredLogger.Task;
 
 namespace BinlogMcp.Tools;

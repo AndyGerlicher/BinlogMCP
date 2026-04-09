@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server for reading and analyzing MSBuild binary 
 
 ## Overview
 
-This server exposes 50 tools that allow AI assistants to analyze MSBuild binary logs, including:
+This server exposes 52 tools that allow AI assistants to analyze MSBuild binary logs, including:
 
 - **Build Info** - Summaries, errors, warnings, properties, items
 - **Performance** - Slowest targets/tasks, compiler timing, parallelism analysis, I/O bottlenecks
@@ -18,7 +18,7 @@ This server exposes 50 tools that allow AI assistants to analyze MSBuild binary 
 
 ### BinlogMCP Client - Interactive Build Investigator
 
-An interactive REPL for analyzing MSBuild binlogs, powered by AIDavid - a virtual MSBuild debugging expert inspired by [David Federman's debugging methodology](https://dfederm.com/debugging-msbuild/).
+An interactive REPL for analyzing MSBuild binlogs, powered by AIDavid - a virtual MSBuild debugging expert inspired by [David Federman's debugging methodology](https://dfederm.com/debugging-msbuild/). Uses the [GitHub Copilot SDK](https://github.com/github/copilot-sdk) for AI-powered analysis.
 
 ```bash
 # Start interactive session with a binlog
@@ -27,6 +27,8 @@ dotnet run --project src/BinlogMcp.Client -- ./build.binlog
 # Or launch and provide the path when prompted
 dotnet run --project src/BinlogMcp.Client
 ```
+
+**Requirements:** Authenticate with GitHub CLI first: `gh auth login`
 
 Once loaded, you'll see an interactive prompt:
 
@@ -62,7 +64,6 @@ binlog>
 - `set baseline <path>` - Set a baseline binlog for comparisons
 - `compare` - Compare current build with baseline
 - `visualize comparison` - Visual comparison chart (requires baseline)
-- `clear` - Clear conversation history (for follow-up questions)
 - `help` - Show available commands
 - `exit` - Exit the program
 
@@ -74,22 +75,12 @@ binlog>
 
 The client maintains conversation history, so you can ask follow-up questions that reference previous answers.
 
-**Execution Modes:**
-- `fast` (default) - Uses the default model (gpt-4.1) for everything.
-- `hybrid` - Uses the default model for tool calls, synthesis model (gpt-5-codex) for final analysis.
-
-```bash
-# Use hybrid mode for more thorough analysis
-dotnet run --project src/BinlogMcp.Client -- ./build.binlog --mode hybrid
-```
-
 **Model Configuration:**
-- `OPENAI_MODEL` - Default model (default: gpt-4.1)
-- `OPENAI_MODEL_SYNTHESIS` - Model for hybrid synthesis step (default: gpt-5-codex)
+- The default model is `claude-opus-4.7`, configured in the session setup.
 
 **Logging:** All LLM and tool interactions are logged to `binlog-client.log` in the current directory.
 
-Requires `OPENAI_API_KEY` environment variable (or use `dotnet user-secrets`).
+Requires GitHub CLI authentication (`gh auth login`) for Copilot SDK model access.
 
 ### Casing Analyzer
 
@@ -104,13 +95,15 @@ The tool walks the filesystem to get canonical casing (disk is the source of tru
 
 ## Requirements
 
-- .NET 10 SDK
+- .NET 10 SDK (pinned via `global.json` with `rollForward: latestFeature`)
 
 ## Building
 
 ```bash
 dotnet build
 ```
+
+The repo uses Central Package Management (`Directory.Packages.props`), Nerdbank.GitVersioning, ReferenceTrimmer, and `TreatWarningsAsErrors`. All builds must be warning-free.
 
 ## Running
 
@@ -121,7 +114,7 @@ dotnet run --project src/BinlogMcp
 ## Testing
 
 ```bash
-# Run unit tests (283 tests)
+# Run unit tests (~293 tests)
 dotnet test tests/BinlogMcp.Tests
 
 # Run LLM integration tests (requires OpenAI API key, costs money - run sparingly)
@@ -134,6 +127,8 @@ dotnet user-secrets set "OpenAI:ApiKey" "sk-..." --project tests/BinlogMcp.Integ
 ```
 
 Or via environment variable: `OPENAI_API_KEY`. Tests skip automatically if no key is configured.
+
+The interactive client (BinlogMcp.Client) uses the GitHub Copilot SDK instead and requires `gh auth login`.
 
 ## MCP Configuration
 
@@ -204,6 +199,8 @@ Add to your MCP client configuration (e.g., Claude Desktop):
 | `GetTargetInputsOutputs` | Show target incremental build inputs/outputs for debugging re-runs |
 | `GetTimeline` | Export timeline data for external visualization tools |
 | `GetEvaluatedProject` | Shows flattened project view - final properties, items, imports after evaluation |
+| `ListEmbeddedSourceFiles` | Lists all embedded source files in the binlog's source archive (.csproj, .props, .targets, etc.) |
+| `GetEmbeddedSourceFile` | Reads the content of a specific embedded source file from the binlog |
 
 ## Output Formats
 

@@ -1,0 +1,4 @@
+[*.cs]
+# IDE0005: Remove unnecessary using directives
+# Required for ReferenceTrimmer accuracy
+dotnet_diagnostic.IDE0005.severity = warning

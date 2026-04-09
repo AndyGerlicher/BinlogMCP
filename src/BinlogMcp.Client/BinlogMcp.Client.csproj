@@ -2,17 +2,12 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <UserSecretsId>binlogmcp-client</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.2" />
-    <PackageReference Include="NLog" Version="5.3.4" />
-    <PackageReference Include="OpenAI" Version="2.8.0" />
-    <PackageReference Include="Spectre.Console" Version="0.54.0" />
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <PackageReference Include="NLog" />
+    <PackageReference Include="Spectre.Console" />
   </ItemGroup>
 
   <ItemGroup>

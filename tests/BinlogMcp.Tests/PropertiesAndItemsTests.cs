@@ -74,9 +74,9 @@ public class GetPropertiesTests
             .Select(p => p.GetProperty("name").GetString())
             .ToList();
 
-        Assert.True(importantNames.Any(n =>
+        Assert.Contains(importantNames, n =>
             n!.Equals("Configuration", StringComparison.OrdinalIgnoreCase) ||
-            n.Equals("TargetFramework", StringComparison.OrdinalIgnoreCase)));
+            n.Equals("TargetFramework", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

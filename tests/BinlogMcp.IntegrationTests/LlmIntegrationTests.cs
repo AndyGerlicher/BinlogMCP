@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using BinlogMcp.Client;
 using BinlogMcp.Tools;
 using Microsoft.Extensions.Configuration;
 using OpenAI;

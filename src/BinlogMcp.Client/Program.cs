@@ -1,45 +1,23 @@
+using System.Diagnostics;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using BinlogMcp.Client;
 using BinlogMcp.Visualization;
 using static BinlogMcp.Client.Colors;
-using Microsoft.Extensions.Configuration;
-using OpenAI;
-using OpenAI.Responses;
-using McpToolDef = BinlogMcp.Client.McpTool;
-
-#pragma warning disable OPENAI001 // Responses API is experimental
-
-// Client constants
-const int MaxAgenticIterations = 30;
-const int MaxSynthesisIterations = 10;
-const int MaxOutputTokens = 16000;
-const int MaxSynthesisOutputTokens = 8000;
-const int MaxToolResultLength = 50000;
+using GitHub.Copilot.SDK;
 
 // Parse command line arguments
 var argsList = args.ToList();
-string? modeOverride = null;
-
-// Parse --mode option
-var modeIndex = argsList.FindIndex(a => a == "--mode" || a == "-m");
-if (modeIndex >= 0 && modeIndex + 1 < argsList.Count)
-{
-    modeOverride = argsList[modeIndex + 1].ToLowerInvariant();
-    argsList.RemoveAt(modeIndex + 1);
-    argsList.RemoveAt(modeIndex);
-}
 
 // Parse --help
-if (argsList.Any(a => a == "--help" || a == "-h" || a == "help"))
+if (argsList.Any(a => a is "--help" or "-h" or "help"))
 {
     PrintUsage();
     return 0;
 }
 
 // Get binlog path (optional - will prompt if not provided)
-string? binlogPath = argsList.FirstOrDefault(a => !a.StartsWith("-"));
+string? binlogPath = argsList.FirstOrDefault(a => !a.StartsWith('-'));
 
 // If no binlog provided, prompt for one
 if (string.IsNullOrEmpty(binlogPath))
@@ -65,40 +43,11 @@ if (!File.Exists(binlogPath))
 // Baseline binlog for comparisons (set via "set baseline <path>")
 string? baselinePath = null;
 
-// Get API key from environment or user secrets
-var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-if (string.IsNullOrEmpty(apiKey))
-{
-    var config = new ConfigurationBuilder()
-        .AddUserSecrets<Program>()
-        .Build();
-    apiKey = config["OpenAI:ApiKey"];
-}
-
-if (string.IsNullOrEmpty(apiKey))
-{
-    Console.Error.WriteLine("Error: OpenAI API key not found.");
-    Console.Error.WriteLine("Set OPENAI_API_KEY environment variable, or use:");
-    Console.Error.WriteLine("  dotnet user-secrets set \"OpenAI:ApiKey\" \"sk-your-key\"");
-    return 1;
-}
-
-// Determine execution mode
-var mode = modeOverride ?? Environment.GetEnvironmentVariable("AIDAVID_MODE")?.ToLowerInvariant() ?? "fast";
-if (mode != "fast" && mode != "hybrid")
-{
-    Console.Error.WriteLine($"Error: Invalid mode '{mode}'. Use: fast or hybrid");
-    return 1;
-}
-
-var model = Environment.GetEnvironmentVariable("OPENAI_MODEL") ?? "gpt-4.1";
-var synthesisModel = Environment.GetEnvironmentVariable("OPENAI_MODEL_SYNTHESIS") ?? "gpt-5-codex";
-
-// Find the MCP server
+// Find the MCP server executable
 var server = FindMcpServer();
 if (server == null)
 {
-    Console.Error.WriteLine("Error: Could not find BinlogMcp server. Run 'dotnet build -c Release' first.");
+    Console.Error.WriteLine("Error: Could not find BinlogMcp server. Run 'dotnet build' first.");
     return 1;
 }
 
@@ -106,27 +55,67 @@ if (server == null)
 PrintBanner();
 
 // Initialize logging
-Logger.LogSessionStart(binlogPath, mode);
+Logger.LogSessionStart(binlogPath, "copilot-sdk");
 
-Console.Error.WriteLine($"     {Colors.White}{Path.GetFileName(binlogPath)}{Colors.Reset} {Colors.Dim}loaded{Colors.Reset}");
+Console.Error.WriteLine($"     {White}{Path.GetFileName(binlogPath)}{Reset} {Dim}loaded{Reset}");
 
-// Start MCP client
-await using var mcp = await McpClient.StartAsync(server.Value.command, server.Value.args);
-
-// List available tools
-var mcpTools = await mcp.ListToolsAsync();
-Console.Error.WriteLine($"     {Colors.Dim}{mcpTools.Count} analysis tools ready{Colors.Reset}");
+// Start direct MCP client for visualization commands
+await using var directMcp = await McpClient.StartAsync(server.Value.command, server.Value.args);
+var mcpTools = await directMcp.ListToolsAsync();
+Console.Error.WriteLine($"     {Dim}{mcpTools.Count} analysis tools ready{Reset}");
 Console.Error.WriteLine();
 
 Logger.LogInfo($"MCP server started with {mcpTools.Count} tools");
 
-// Create OpenAI client
-var openAiClient = new OpenAIClient(apiKey);
-var statusDisplay = new StatusDisplay();
+// Create Copilot SDK client and session
+await using var copilot = new CopilotClient();
 
-// Build the system prompt for conversation
-var systemPrompt = GetInteractiveSystemPrompt(binlogPath);
-var conversation = new ConversationManager(systemPrompt);
+var statusDisplay = new StatusDisplay();
+int toolCallCount = 0;
+
+// Build the system prompt
+var systemPromptContent = GetSystemPrompt(binlogPath);
+
+// Create session with MCP server pointing to BinlogMcp
+var mcpServerArgs = server.Value.args.ToList();
+var mcpCommand = server.Value.command;
+
+var session = await copilot.CreateSessionAsync(new SessionConfig
+{
+    Model = "claude-opus-4.7",
+    Streaming = true,
+    SystemMessage = new SystemMessageConfig
+    {
+        Content = systemPromptContent,
+    },
+    McpServers = new Dictionary<string, McpServerConfig>
+    {
+        ["binlog-mcp"] = new McpStdioServerConfig
+        {
+            Command = mcpCommand,
+            Args = mcpServerArgs,
+            Tools = ["*"],
+        },
+    },
+    OnPermissionRequest = PermissionHandler.ApproveAll,
+    Hooks = new SessionHooks
+    {
+        OnPreToolUse = (input, _) =>
+        {
+            Logger.LogToolCall(input.ToolName, input.ToolArgs?.ToString() ?? "{}");
+            Interlocked.Increment(ref toolCallCount);
+            statusDisplay.ShowStatus();
+            return Task.FromResult<PreToolUseHookOutput?>(
+                new PreToolUseHookOutput { PermissionDecision = "allow" });
+        },
+        OnPostToolUse = (input, _) =>
+        {
+            var resultPreview = input.ToolResult?.ToString() ?? "";
+            Logger.LogToolResult(input.ToolName, resultPreview.Length > 200 ? resultPreview[..200] : resultPreview);
+            return Task.FromResult<PostToolUseHookOutput?>(null);
+        },
+    },
+});
 
 // Show welcome message
 PrintWelcome();
@@ -134,7 +123,7 @@ PrintWelcome();
 // REPL loop
 while (true)
 {
-    Console.Error.Write($"{Colors.BrightCyan}binlog>{Colors.Reset} ");
+    Console.Error.Write($"{BrightCyan}binlog>{Reset} ");
     var input = Console.ReadLine()?.Trim();
 
     if (string.IsNullOrEmpty(input))
@@ -147,7 +136,7 @@ while (true)
     // Handle commands
     if (lowerInput is "exit" or "quit" or "q")
     {
-        Console.Error.WriteLine($"{Colors.Dim}Goodbye!{Colors.Reset}");
+        Console.Error.WriteLine($"{Dim}Goodbye!{Reset}");
         Logger.LogInfo("Session ended by user");
         break;
     }
@@ -155,14 +144,6 @@ while (true)
     if (lowerInput is "help" or "?" or "4")
     {
         PrintHelp();
-        continue;
-    }
-
-    if (lowerInput is "clear")
-    {
-        conversation.Clear();
-        statusDisplay.Reset();
-        Console.Error.WriteLine("Conversation cleared.");
         continue;
     }
 
@@ -190,45 +171,19 @@ while (true)
         }
 
         baselinePath = path;
-        Console.Error.WriteLine($"{Colors.Green}Baseline set:{Colors.Reset} {Colors.White}{Path.GetFileName(baselinePath)}{Colors.Reset}");
-        Console.Error.WriteLine($"{Colors.Dim}Use 'compare' or 'visualize comparison' to compare builds.{Colors.Reset}");
+        Console.Error.WriteLine($"{Green}Baseline set:{Reset} {White}{Path.GetFileName(baselinePath)}{Reset}");
+        Console.Error.WriteLine($"{Dim}Use 'compare' or 'visualize comparison' to compare builds.{Reset}");
         continue;
     }
 
     if (lowerInput is "clear baseline")
     {
         baselinePath = null;
-        Console.Error.WriteLine($"{Colors.Dim}Baseline cleared.{Colors.Reset}");
+        Console.Error.WriteLine($"{Dim}Baseline cleared.{Reset}");
         continue;
     }
 
-    // Compare command (shortcut for performance comparison)
-    if (lowerInput is "compare" or "comparison")
-    {
-        if (baselinePath == null)
-        {
-            Console.Error.WriteLine("No baseline set. Use 'set baseline <path>' first.");
-            continue;
-        }
-
-        Console.Error.WriteLine();
-        Console.Error.WriteLine($"{Colors.BrightCyan}Comparing:{Colors.Reset} {Colors.Dim}{Path.GetFileName(baselinePath)} → {Path.GetFileName(binlogPath)}{Colors.Reset}");
-        Console.Error.WriteLine();
-
-        // Ask LLM to do the comparison
-        var comparePrompt = $"Compare the baseline build ({baselinePath}) with the current build ({binlogPath}). " +
-            "Use ComparePerformance, DiffTargetExecution, and DiffProperties to show the key differences. " +
-            "Focus on timing changes, what ran differently, and any important property changes.";
-
-        await RunConversation(
-            openAiClient, model, comparePrompt,
-            mcpTools, mcp, conversation, statusDisplay);
-
-        Console.Error.WriteLine();
-        continue;
-    }
-
-    // Visualization commands
+    // Visualization commands (direct MCP calls, no LLM needed)
     if (lowerInput.StartsWith("visualize ") || lowerInput.StartsWith("viz ") || lowerInput is "2" or "3")
     {
         var vizType = lowerInput switch
@@ -238,20 +193,46 @@ while (true)
             _ => lowerInput.Substring(lowerInput.StartsWith("visualize ") ? 10 : 4).Trim()
         };
 
-        await HandleVisualize(vizType, binlogPath, baselinePath, mcp, statusDisplay);
+        await HandleVisualize(vizType, binlogPath, baselinePath, directMcp, statusDisplay);
         continue;
     }
 
+    // Diagnose command
     if (lowerInput is "diagnose" or "yes" or "y" or "1")
     {
-        // Run AIDavid diagnosis
         Console.Error.WriteLine();
-        Console.Error.WriteLine($"{Colors.BrightCyan}Running AIDavid diagnosis...{Colors.Reset}");
+        Console.Error.WriteLine($"{BrightCyan}Running AIDavid diagnosis...{Reset}");
         Console.Error.WriteLine();
 
-        await RunDiagnosis(
-            openAiClient, model, synthesisModel, mode, binlogPath,
-            mcpTools, mcp, statusDisplay);
+        toolCallCount = 0;
+        var stats = await SendAndRender(session, statusDisplay,
+            "Analyze this build and provide a comprehensive diagnosis. Follow the investigation process in your instructions.",
+            outputFile: "diag.md");
+
+        // Print stats footer
+        PrintStats(stats, toolCallCount);
+
+        Console.Error.WriteLine();
+        continue;
+    }
+
+    // Compare command
+    if (lowerInput is "compare" or "comparison")
+    {
+        if (baselinePath == null)
+        {
+            Console.Error.WriteLine("No baseline set. Use 'set baseline <path>' first.");
+            continue;
+        }
+
+        Console.Error.WriteLine();
+        Console.Error.WriteLine($"{BrightCyan}Comparing:{Reset} {Dim}{Path.GetFileName(baselinePath)} → {Path.GetFileName(binlogPath)}{Reset}");
+        Console.Error.WriteLine();
+
+        await SendAndRender(session, statusDisplay,
+            $"Compare the baseline build ({baselinePath}) with the current build ({binlogPath}). " +
+            "Use ComparePerformance, DiffTargetExecution, and DiffProperties to show the key differences. " +
+            "Focus on timing changes, what ran differently, and any important property changes.");
 
         Console.Error.WriteLine();
         continue;
@@ -260,9 +241,7 @@ while (true)
     // Regular conversation - ask a question
     Console.Error.WriteLine();
 
-    await RunConversation(
-        openAiClient, model, input,
-        mcpTools, mcp, conversation, statusDisplay);
+    await SendAndRender(session, statusDisplay, input);
 
     Console.Error.WriteLine();
 }
@@ -271,746 +250,171 @@ Logger.Flush();
 return 0;
 
 // ============================================================================
-// Interactive conversation with history (using Responses API)
+// Send a prompt to the Copilot SDK session and render the response
 // ============================================================================
 
-static async Task RunConversation(
-    OpenAIClient openAiClient,
-    string model,
-    string userInput,
-    List<McpToolDef> mcpTools,
-    McpClient mcp,
-    ConversationManager conversation,
-    StatusDisplay statusDisplay)
+static async Task<(long inputTokens, long outputTokens, long cacheReadTokens, long cacheWriteTokens, double elapsedSeconds)> SendAndRender(
+    CopilotSession session,
+    StatusDisplay statusDisplay,
+    string prompt,
+    string? outputFile = null)
 {
-    conversation.AddUserMessage(userInput);
+    Logger.LogInfo($"[PROMPT] {prompt}");
+    statusDisplay.ShowStatus();
 
-    var responsesClient = openAiClient.GetResponsesClient(model);
+    var responseBuilder = new StringBuilder();
+    var done = new TaskCompletionSource();
+    var sw = Stopwatch.StartNew();
 
-    // Convert MCP tools to Responses API function tools
-    var tools = mcpTools.Select(t =>
+    long totalInputTokens = 0;
+    long totalOutputTokens = 0;
+    long totalCacheReadTokens = 0;
+    long totalCacheWriteTokens = 0;
+
+    session.On(evt =>
     {
-        var schema = t.InputSchema?.AsObject() ?? new JsonObject();
-        if (!schema.ContainsKey("type"))
-            schema["type"] = "object";
-
-        return ResponseTool.CreateFunctionTool(
-            t.Name,
-            BinaryData.FromString(schema.ToJsonString()),
-            strictModeEnabled: false,
-            functionDescription: t.Description);
-    }).ToList();
-
-    var options = new CreateResponseOptions
-    {
-        Instructions = conversation.SystemPrompt,
-        MaxOutputTokenCount = MaxOutputTokens
-    };
-    foreach (var tool in tools)
-        options.Tools.Add(tool);
-
-    // Add conversation history as input items
-    foreach (var item in conversation.GetResponseItems())
-        options.InputItems.Add(item);
-
-    string? previousResponseId = null;
-    int totalToolCalls = 0;
-
-    for (int i = 0; i < MaxAgenticIterations; i++)
-    {
-        Logger.LogIteration(i + 1, MaxAgenticIterations, totalToolCalls);
-        statusDisplay.ShowStatus();
-
-        if (previousResponseId != null)
+        switch (evt)
         {
-            options.PreviousResponseId = previousResponseId;
-        }
-
-        var response = await responsesClient.CreateResponseAsync(options);
-        var result = response.Value;
-
-        Logger.LogLlmResponse(model, result.Status?.ToString() ?? "Unknown");
-
-        if (result.Status == ResponseStatus.Failed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogError($"Response failed: {result.Error?.Message}");
-            Console.Error.WriteLine($"Response failed: {result.Error?.Message ?? "Unknown error"}");
-            break;
-        }
-
-        var functionCalls = new List<FunctionCallResponseItem>();
-        var textOutputBuilder = new StringBuilder();
-
-        foreach (var item in result.OutputItems)
-        {
-            switch (item)
-            {
-                case FunctionCallResponseItem funcCall:
-                    functionCalls.Add(funcCall);
-                    break;
-
-                case MessageResponseItem message:
-                    foreach (var content in message.Content)
-                    {
-                        if (content.Kind == ResponseContentPartKind.OutputText && !string.IsNullOrEmpty(content.Text))
-                        {
-                            textOutputBuilder.Append(content.Text);
-                        }
-                    }
-                    break;
-            }
-        }
-
-        var textOutput = textOutputBuilder.ToString();
-
-        if (functionCalls.Count > 0)
-        {
-            previousResponseId = result.Id;
-            options.InputItems.Clear();
-
-            foreach (var funcCall in functionCalls)
-            {
-                totalToolCalls++;
+            case AssistantMessageDeltaEvent delta:
                 statusDisplay.ShowStatus();
+                responseBuilder.Append(delta.Data.DeltaContent);
+                break;
 
-                var argsJson = JsonNode.Parse(funcCall.FunctionArguments.ToString()) as JsonObject
-                    ?? new JsonObject();
+            case AssistantUsageEvent usage:
+                totalInputTokens += (long)(usage.Data.InputTokens ?? 0);
+                totalOutputTokens += (long)(usage.Data.OutputTokens ?? 0);
+                totalCacheReadTokens += (long)(usage.Data.CacheReadTokens ?? 0);
+                totalCacheWriteTokens += (long)(usage.Data.CacheWriteTokens ?? 0);
+                break;
 
-                Logger.LogToolCall(funcCall.FunctionName, argsJson.ToJsonString());
-
-                try
-                {
-                    var toolResult = await mcp.CallToolAsync(funcCall.FunctionName, argsJson);
-
-                    if (toolResult.Length > MaxToolResultLength)
-                    {
-                        toolResult = toolResult[..MaxToolResultLength] + "\n\n[Output truncated due to length]";
-                    }
-
-                    Logger.LogToolResult(funcCall.FunctionName, toolResult);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(funcCall.CallId, toolResult));
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogToolResult(funcCall.FunctionName, ex.Message, isError: true);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(
-                        funcCall.CallId,
-                        $"Error calling tool: {ex.Message}"));
-                }
-            }
+            case SessionIdleEvent:
+                done.TrySetResult();
+                break;
         }
-        else if (!string.IsNullOrEmpty(textOutput))
-        {
-            statusDisplay.ClearStatus();
-            conversation.AddAssistantMessage(textOutput);
-            Logger.LogCompletion(totalToolCalls, textOutput);
-            MarkdownRenderer.Render(textOutput);
-            return;
-        }
-        else if (result.Status == ResponseStatus.Completed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogWarning("Response completed with no recognized output");
-            Console.Error.WriteLine("Warning: Response completed with no recognized output.");
-            return;
-        }
-    }
-
-    statusDisplay.ClearStatus();
-    Logger.LogWarning($"Reached maximum iterations ({MaxAgenticIterations})");
-    Console.Error.WriteLine($"Warning: Reached maximum iterations ({MaxAgenticIterations}) with {totalToolCalls} tool calls.");
-}
-
-// ============================================================================
-// AIDavid diagnosis mode
-// ============================================================================
-
-static async Task RunDiagnosis(
-    OpenAIClient openAiClient,
-    string model,
-    string synthesisModel,
-    string mode,
-    string binlogPath,
-    List<McpToolDef> mcpTools,
-    McpClient mcp,
-    StatusDisplay statusDisplay)
-{
-    var systemPrompt = GetAiDavidSystemPrompt(binlogPath);
-    var userPrompt = "Analyze this build and provide a comprehensive diagnosis.";
-
-    Logger.LogInfo($"Starting AIDavid diagnosis in {mode} mode");
-
-    switch (mode)
-    {
-        case "hybrid":
-            await RunHybridLoop(openAiClient, model, synthesisModel, systemPrompt, userPrompt, mcpTools, mcp, statusDisplay);
-            break;
-
-        case "fast":
-        default:
-            await RunResponsesApiLoop(openAiClient, model, systemPrompt, userPrompt, mcpTools, mcp, statusDisplay);
-            break;
-    }
-}
-
-// ============================================================================
-// Responses API agentic loop
-// ============================================================================
-
-static async Task RunResponsesApiLoop(
-    OpenAIClient openAiClient,
-    string model,
-    string systemPrompt,
-    string userPrompt,
-    List<McpToolDef> mcpTools,
-    McpClient mcp,
-    StatusDisplay statusDisplay)
-{
-    var responsesClient = openAiClient.GetResponsesClient(model);
-
-    var tools = mcpTools.Select(t =>
-    {
-        var schema = t.InputSchema?.AsObject() ?? new JsonObject();
-        if (!schema.ContainsKey("type"))
-            schema["type"] = "object";
-
-        return ResponseTool.CreateFunctionTool(
-            t.Name,
-            BinaryData.FromString(schema.ToJsonString()),
-            strictModeEnabled: false,
-            functionDescription: t.Description);
-    }).ToList();
-
-    var options = new CreateResponseOptions
-    {
-        Instructions = systemPrompt,
-        MaxOutputTokenCount = MaxOutputTokens
-    };
-    foreach (var tool in tools)
-        options.Tools.Add(tool);
-
-    options.InputItems.Add(ResponseItem.CreateUserMessageItem(userPrompt));
-
-    string? previousResponseId = null;
-    int totalToolCalls = 0;
-
-    for (int i = 0; i < MaxAgenticIterations; i++)
-    {
-        Logger.LogIteration(i + 1, MaxAgenticIterations, totalToolCalls);
-        statusDisplay.ShowStatus();
-
-        if (previousResponseId != null)
-        {
-            options.PreviousResponseId = previousResponseId;
-        }
-
-        var response = await responsesClient.CreateResponseAsync(options);
-        var result = response.Value;
-
-        Logger.LogLlmResponse(model, result.Status?.ToString() ?? "Unknown");
-
-        if (result.Status == ResponseStatus.Failed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogError($"Response failed: {result.Error?.Message}");
-            Console.Error.WriteLine($"Response failed: {result.Error?.Message ?? "Unknown error"}");
-            break;
-        }
-
-        var functionCalls = new List<FunctionCallResponseItem>();
-        var textOutputBuilder = new StringBuilder();
-
-        foreach (var item in result.OutputItems)
-        {
-            switch (item)
-            {
-                case FunctionCallResponseItem funcCall:
-                    functionCalls.Add(funcCall);
-                    break;
-
-                case MessageResponseItem message:
-                    foreach (var content in message.Content)
-                    {
-                        if (content.Kind == ResponseContentPartKind.OutputText && !string.IsNullOrEmpty(content.Text))
-                        {
-                            textOutputBuilder.Append(content.Text);
-                        }
-                    }
-                    break;
-            }
-        }
-
-        var textOutput = textOutputBuilder.ToString();
-
-        if (functionCalls.Count > 0)
-        {
-            previousResponseId = result.Id;
-            options.InputItems.Clear();
-
-            foreach (var funcCall in functionCalls)
-            {
-                totalToolCalls++;
-                statusDisplay.ShowStatus();
-
-                var argsJson = JsonNode.Parse(funcCall.FunctionArguments.ToString()) as JsonObject
-                    ?? new JsonObject();
-
-                Logger.LogToolCall(funcCall.FunctionName, argsJson.ToJsonString());
-
-                try
-                {
-                    var toolResult = await mcp.CallToolAsync(funcCall.FunctionName, argsJson);
-
-                    if (toolResult.Length > MaxToolResultLength)
-                    {
-                        toolResult = toolResult[..MaxToolResultLength] + "\n\n[Output truncated due to length]";
-                    }
-
-                    Logger.LogToolResult(funcCall.FunctionName, toolResult);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(funcCall.CallId, toolResult));
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogToolResult(funcCall.FunctionName, ex.Message, isError: true);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(
-                        funcCall.CallId,
-                        $"Error calling tool: {ex.Message}"));
-                }
-            }
-        }
-        else if (!string.IsNullOrEmpty(textOutput))
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogCompletion(totalToolCalls, textOutput);
-            MarkdownRenderer.Render(textOutput);
-            return;
-        }
-        else if (result.Status == ResponseStatus.Completed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogWarning("Response completed with no recognized output");
-            Console.Error.WriteLine("Warning: Response completed with no recognized output.");
-            return;
-        }
-    }
-
-    statusDisplay.ClearStatus();
-    Logger.LogWarning($"Reached maximum iterations ({MaxAgenticIterations})");
-    Console.Error.WriteLine($"Warning: Reached maximum iterations ({MaxAgenticIterations}) with {totalToolCalls} tool calls.");
-}
-
-// ============================================================================
-// Responses API internal loop (returns tool results for hybrid mode)
-// ============================================================================
-
-static async Task<(string? finalResponse, List<(string tool, string args, string result)> toolResults)> RunResponsesApiLoopInternal(
-    OpenAIClient openAiClient,
-    string model,
-    string systemPrompt,
-    string userPrompt,
-    List<McpToolDef> mcpTools,
-    McpClient mcp,
-    StatusDisplay statusDisplay)
-{
-    var responsesClient = openAiClient.GetResponsesClient(model);
-    var collectedToolResults = new List<(string tool, string args, string result)>();
-
-    var tools = mcpTools.Select(t =>
-    {
-        var schema = t.InputSchema?.AsObject() ?? new JsonObject();
-        if (!schema.ContainsKey("type"))
-            schema["type"] = "object";
-
-        return ResponseTool.CreateFunctionTool(
-            t.Name,
-            BinaryData.FromString(schema.ToJsonString()),
-            strictModeEnabled: false,
-            functionDescription: t.Description);
-    }).ToList();
-
-    var options = new CreateResponseOptions
-    {
-        Instructions = systemPrompt,
-        MaxOutputTokenCount = MaxOutputTokens
-    };
-    foreach (var tool in tools)
-        options.Tools.Add(tool);
-
-    options.InputItems.Add(ResponseItem.CreateUserMessageItem(userPrompt));
-
-    string? previousResponseId = null;
-    int totalToolCalls = 0;
-
-    for (int i = 0; i < MaxAgenticIterations; i++)
-    {
-        Logger.LogIteration(i + 1, MaxAgenticIterations, totalToolCalls);
-        statusDisplay.ShowStatus();
-
-        if (previousResponseId != null)
-        {
-            options.PreviousResponseId = previousResponseId;
-        }
-
-        var response = await responsesClient.CreateResponseAsync(options);
-        var result = response.Value;
-
-        Logger.LogLlmResponse(model, result.Status?.ToString() ?? "Unknown");
-
-        if (result.Status == ResponseStatus.Failed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogError($"Response failed: {result.Error?.Message}");
-            return (null, collectedToolResults);
-        }
-
-        var functionCalls = new List<FunctionCallResponseItem>();
-        var textOutputBuilder = new StringBuilder();
-
-        foreach (var item in result.OutputItems)
-        {
-            switch (item)
-            {
-                case FunctionCallResponseItem funcCall:
-                    functionCalls.Add(funcCall);
-                    break;
-
-                case MessageResponseItem message:
-                    foreach (var content in message.Content)
-                    {
-                        if (content.Kind == ResponseContentPartKind.OutputText && !string.IsNullOrEmpty(content.Text))
-                        {
-                            textOutputBuilder.Append(content.Text);
-                        }
-                    }
-                    break;
-            }
-        }
-
-        var textOutput = textOutputBuilder.ToString();
-
-        if (functionCalls.Count > 0)
-        {
-            previousResponseId = result.Id;
-            options.InputItems.Clear();
-
-            foreach (var funcCall in functionCalls)
-            {
-                totalToolCalls++;
-                statusDisplay.ShowStatus();
-
-                var argsJson = JsonNode.Parse(funcCall.FunctionArguments.ToString()) as JsonObject
-                    ?? new JsonObject();
-                var argsString = argsJson.ToJsonString();
-
-                Logger.LogToolCall(funcCall.FunctionName, argsString);
-
-                try
-                {
-                    var toolResult = await mcp.CallToolAsync(funcCall.FunctionName, argsJson);
-
-                    collectedToolResults.Add((funcCall.FunctionName, argsString, toolResult));
-
-                    if (toolResult.Length > MaxToolResultLength)
-                    {
-                        toolResult = toolResult[..MaxToolResultLength] + "\n\n[Output truncated due to length]";
-                    }
-
-                    Logger.LogToolResult(funcCall.FunctionName, toolResult);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(funcCall.CallId, toolResult));
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogToolResult(funcCall.FunctionName, ex.Message, isError: true);
-                    options.InputItems.Add(ResponseItem.CreateFunctionCallOutputItem(
-                        funcCall.CallId,
-                        $"Error calling tool: {ex.Message}"));
-                    collectedToolResults.Add((funcCall.FunctionName, argsString, $"Error: {ex.Message}"));
-                }
-            }
-        }
-        else if (!string.IsNullOrEmpty(textOutput))
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogCompletion(totalToolCalls, textOutput);
-            return (textOutput, collectedToolResults);
-        }
-        else if (result.Status == ResponseStatus.Completed)
-        {
-            statusDisplay.ClearStatus();
-            Logger.LogWarning("Response completed with no recognized output");
-            return (null, collectedToolResults);
-        }
-    }
-
-    statusDisplay.ClearStatus();
-    Logger.LogWarning($"Reached maximum iterations ({MaxAgenticIterations})");
-    return (null, collectedToolResults);
-}
-
-// ============================================================================
-// Hybrid mode: default model for tool calls, synthesis model for final analysis
-// ============================================================================
-
-static async Task RunHybridLoop(
-    OpenAIClient openAiClient,
-    string model,
-    string synthesisModel,
-    string systemPrompt,
-    string userPrompt,
-    List<McpToolDef> mcpTools,
-    McpClient mcp,
-    StatusDisplay statusDisplay)
-{
-    Console.Error.WriteLine($"{Colors.Dim}Phase 1: Gathering information with {model}...{Colors.Reset}");
-    Console.Error.WriteLine();
-
-    var gatheringPrompt = GetAiDavidGatheringPrompt(userPrompt);
-
-    var (initialAnalysis, toolResults) = await RunResponsesApiLoopInternal(
-        openAiClient, model, systemPrompt + "\n\n" + gatheringPrompt, userPrompt, mcpTools, mcp, statusDisplay);
-
-    if (toolResults.Count == 0)
-    {
-        Console.Error.WriteLine("No tools were called. Using model output directly.");
-        if (!string.IsNullOrEmpty(initialAnalysis))
-        {
-            MarkdownRenderer.Render(initialAnalysis);
-        }
-        return;
-    }
-
-    Console.Error.WriteLine();
-    Console.Error.WriteLine($"{Colors.Dim}Phase 2: Synthesizing with {synthesisModel}...{Colors.Reset}");
-    Console.Error.WriteLine();
-
-    var contextBuilder = new StringBuilder();
-    contextBuilder.AppendLine("# Build Analysis Context");
-    contextBuilder.AppendLine();
-    contextBuilder.AppendLine("The following information was gathered from analyzing the binlog:");
-    contextBuilder.AppendLine();
-
-    foreach (var (tool, args, result) in toolResults)
-    {
-        contextBuilder.AppendLine($"## {tool}");
-        if (!string.IsNullOrEmpty(args) && args != "{}")
-        {
-            contextBuilder.AppendLine($"Arguments: {args}");
-        }
-        contextBuilder.AppendLine();
-        contextBuilder.AppendLine("```json");
-        var truncatedResult = result.Length > 15000
-            ? result[..15000] + "\n... [truncated]"
-            : result;
-        contextBuilder.AppendLine(truncatedResult);
-        contextBuilder.AppendLine("```");
-        contextBuilder.AppendLine();
-    }
-
-    if (!string.IsNullOrEmpty(initialAnalysis))
-    {
-        contextBuilder.AppendLine("## Initial Analysis");
-        contextBuilder.AppendLine(initialAnalysis);
-        contextBuilder.AppendLine();
-    }
-
-    var synthesisPrompt = GetAiDavidSynthesisPrompt();
-
-    var responsesClient = openAiClient.GetResponsesClient(synthesisModel);
-
-    var options = new CreateResponseOptions
-    {
-        Instructions = synthesisPrompt,
-        MaxOutputTokenCount = MaxSynthesisOutputTokens
-    };
-
-    options.InputItems.Add(ResponseItem.CreateUserMessageItem(contextBuilder.ToString()));
+    });
 
     try
     {
-        string? previousResponseId = null;
-        var synthesisOutput = new StringBuilder();
-
-        for (int i = 0; i < MaxSynthesisIterations; i++)
-        {
-            statusDisplay.ShowStatus("Synthesizing...");
-
-            if (previousResponseId != null)
-            {
-                options.PreviousResponseId = previousResponseId;
-                options.InputItems.Clear();
-            }
-
-            var response = await responsesClient.CreateResponseAsync(options);
-            var result = response.Value;
-
-            Logger.LogLlmResponse(synthesisModel, result.Status?.ToString() ?? "Unknown");
-
-            if (result.Status == ResponseStatus.Failed)
-            {
-                statusDisplay.ClearStatus();
-                Logger.LogError($"Synthesis failed: {result.Error?.Message}");
-                break;
-            }
-
-            foreach (var item in result.OutputItems)
-            {
-                if (item is MessageResponseItem message)
-                {
-                    foreach (var content in message.Content)
-                    {
-                        if (content.Kind == ResponseContentPartKind.OutputText && !string.IsNullOrEmpty(content.Text))
-                        {
-                            synthesisOutput.Append(content.Text);
-                        }
-                    }
-                }
-            }
-
-            if (result.Status == ResponseStatus.Completed)
-            {
-                Logger.LogDebug($"Synthesis completed after {i + 1} iteration(s)");
-                break;
-            }
-
-            if (result.Status == ResponseStatus.Incomplete)
-            {
-                previousResponseId = result.Id;
-                continue;
-            }
-
-            Logger.LogWarning($"Unexpected synthesis status: {result.Status}");
-            break;
-        }
-
-        statusDisplay.ClearStatus();
-
-        if (synthesisOutput.Length > 0)
-        {
-            Logger.LogCompletion(toolResults.Count, synthesisOutput.ToString());
-            MarkdownRenderer.Render(synthesisOutput.ToString());
-        }
-        else
-        {
-            Console.Error.WriteLine("Warning: Synthesis returned no text output.");
-            if (!string.IsNullOrEmpty(initialAnalysis))
-            {
-                Console.Error.WriteLine("Falling back to initial model analysis:");
-                MarkdownRenderer.Render(initialAnalysis);
-            }
-        }
+        await session.SendAsync(new MessageOptions { Prompt = prompt });
+        await done.Task;
     }
     catch (Exception ex)
     {
         statusDisplay.ClearStatus();
-        Logger.LogError($"Error during synthesis: {ex.Message}", ex);
-
-        if (!string.IsNullOrEmpty(initialAnalysis))
-        {
-            Console.Error.WriteLine("Falling back to initial model analysis:");
-            MarkdownRenderer.Render(initialAnalysis);
-        }
+        Logger.LogError($"Error: {ex.Message}", ex);
+        Console.Error.WriteLine($"Error: {ex.Message}");
     }
+
+    sw.Stop();
+    statusDisplay.ClearStatus();
+
+    var finalResponse = responseBuilder.ToString();
+    if (!string.IsNullOrEmpty(finalResponse))
+    {
+        // Render markdown nicely to console
+        MarkdownRenderer.Render(finalResponse);
+
+        // Write raw markdown to file if requested
+        if (outputFile != null)
+        {
+            var fullPath = Path.GetFullPath(outputFile);
+            await File.WriteAllTextAsync(fullPath, finalResponse);
+            Console.Error.WriteLine();
+            Console.Error.WriteLine($"{Dim}Saved to {fullPath}{Reset}");
+        }
+
+        Logger.LogCompletion(0, finalResponse);
+    }
+
+    return (
+        totalInputTokens,
+        totalOutputTokens,
+        totalCacheReadTokens,
+        totalCacheWriteTokens,
+        sw.Elapsed.TotalSeconds);
+}
+
+static void PrintStats(
+    (long inputTokens, long outputTokens, long cacheReadTokens, long cacheWriteTokens, double elapsedSeconds) stats,
+    int toolCalls)
+{
+    Console.Error.WriteLine();
+    Console.Error.WriteLine($"{Dim}───────────────────────────────────────────────────{Reset}");
+
+    var minutes = (int)(stats.elapsedSeconds / 60);
+    var seconds = stats.elapsedSeconds % 60;
+    var timeStr = minutes > 0 ? $"{minutes}m {seconds:F0}s" : $"{seconds:F1}s";
+
+    Console.Error.WriteLine($"{Dim}  ⏱  {timeStr}  │  {toolCalls} tool calls{Reset}");
+
+    var nonCached = stats.inputTokens - stats.cacheReadTokens;
+    Console.Error.WriteLine($"{Dim}  📊 Input: {stats.inputTokens:N0} tokens ({nonCached:N0} non-cached, {stats.cacheReadTokens:N0} cached){Reset}");
+    Console.Error.WriteLine($"{Dim}     Output: {stats.outputTokens:N0} tokens  │  Cache writes: {stats.cacheWriteTokens:N0}{Reset}");
+    Console.Error.WriteLine($"{Dim}───────────────────────────────────────────────────{Reset}");
 }
 
 // ============================================================================
-// System prompts
+// System prompt
 // ============================================================================
 
-static string GetInteractiveSystemPrompt(string binlogPath) => $"""
-    You are an MSBuild binary log analyzer with access to powerful analysis tools.
+static string GetSystemPrompt(string binlogPath) => $"""
+    You are AIDavid, a virtual MSBuild debugging expert inspired by David Federman's methodology
+    (dfederm.com/debugging-msbuild).
 
-    The user is analyzing this binlog file: {binlogPath}
-
-    When the user asks questions, use the available tools to gather information and provide helpful answers.
+    You are analyzing this binlog file: {binlogPath}
     When calling tools that require a binlog path, always use: {binlogPath}
 
-    ## Understanding Build Structure
-
-    When analyzing performance or timing:
-    - **dirs.proj, *.sln, *.slnx files** are aggregation/traversal projects that orchestrate building many projects.
-      It's expected and correct that they span most or all of the build time - they're not the bottleneck themselves.
-    - When these appear as "slow", dig into the actual projects they contain to find the real bottlenecks.
-    - Use GetProjectDependencies or GetProjectPerformance to see the individual projects and their timings.
-    - The interesting analysis is which actual projects (*.csproj, *.vbproj, etc.) are slow, not the aggregators.
-
-    Be concise but thorough. If you find errors or issues, explain what they mean and suggest fixes.
-    Remember the context from previous questions in this conversation.
-    """;
-
-static string GetAiDavidGatheringPrompt(string userPrompt) => """
-    IMPORTANT: Your role in this phase is to GATHER INFORMATION using the available tools.
-    Do NOT provide a final diagnosis yet. Just call the relevant tools to collect data.
-
-    After gathering information, provide a brief summary of what you found, but note that
-    a more thorough analysis will follow.
-
-    Start by calling GetBuildSummary, then based on what you find, call additional tools
-    to investigate errors, performance, or other issues.
-    """;
-
-static string GetAiDavidSynthesisPrompt() => """
-    You are AIDavid, a virtual MSBuild debugging expert inspired by David Federman's methodology.
-
-    You have been provided with detailed analysis data gathered from an MSBuild binary log.
-    Your job is to synthesize this information into a clear, actionable diagnosis.
-
-    ## Understanding Build Structure
-
-    When discussing performance:
-    - **dirs.proj, *.sln, *.slnx files** are aggregation projects that orchestrate building many projects.
-      They're expected to span the entire build time - this is normal, not a problem.
-    - Focus on actual projects (*.csproj, *.vbproj, etc.) when identifying bottlenecks.
-    - Don't suggest "optimizing" dirs.proj or solution files - they're just orchestrators.
-
-    ## Your Output Format
-
-    Structure your diagnosis as:
-
-    ## Build Overview
-    [Quick summary of what this build was trying to do and the outcome]
-
-    ## What Happened
-    [Factual description of the build execution, errors, key events]
-
-    ## Why It Happened
-    [Root cause analysis - trace the issue back to its source]
-
-    ## Recommendations
-    [Specific, actionable steps to fix the issue, ordered by priority]
-
-    ## Additional Observations (if relevant)
-    [Performance issues, warnings worth addressing, other improvements]
-
-    ---
-
-    Be direct, specific, and actionable. Developers should be able to take your recommendations
-    and immediately start fixing issues. Explain MSBuild concepts when they're not obvious.
-    """;
-
-static string GetAiDavidSystemPrompt(string binlogPath) => $"""
-    You are AIDavid, a virtual MSBuild debugging expert inspired by David Federman's methodology.
-
-    Your debugging philosophy follows David's approach from his influential guide on MSBuild debugging:
-
-    ## The Two Questions
+    ## Your Debugging Philosophy
 
     Every MSBuild investigation answers two fundamental questions:
-    1. **"What happened?"** - Examine target execution, property values, items, and actual build results
-    2. **"Why did it happen?"** - Trace the logic: imports, conditions, property origins, target dependencies
+    1. **"What happened?"** — Examine target execution, property values, items, and actual build results
+    2. **"Why did it happen?"** — Trace the logic: imports, conditions, property origins, target dependencies
+
+    **CRITICAL: Always pursue root cause.** Don't just explain what an error message says — dig into WHY
+    it happened. Error messages can be misleading. The binlog contains the actual truth — task inputs,
+    property values, and the embedded source files. Trust the data, not the error text.
+
+    ## Key Investigation Techniques
+
+    ### Trace Task Inputs (most important technique)
+    When a task produces an error, the error message alone is NOT the root cause. You must:
+    1. Use `AnalyzeTarget` to inspect the target that ran the failing task
+    2. Examine the task's **input parameters** — what data was fed into the task?
+    3. Trace suspicious input values back to their source using `GetPropertyOrigin` / `TraceProperty`
+    4. If an input references a file (config files, response files, etc.), use `GetEmbeddedSourceFile`
+       to read the actual file content
+
+    ### Read the Source Files
+    The binlog embeds the actual project files used during the build. Use them!
+    - `ListEmbeddedSourceFiles` to discover what's available
+    - `GetEmbeddedSourceFile` to read .csproj, .props, .targets, App.config, Directory.Build.props, etc.
+    - When an error references a file path, read that file to understand what it contains
+    - Cross-reference what the error says against what the file actually contains — they may disagree
+
+    ### Verify Claims Against Data
+    Error messages, especially from ResolveAssemblyReference (RAR), can be misleading:
+    - RAR may report that assembly X "depends on" version Y, but this can be an artifact of
+      binding redirects or other unification logic, not the actual assembly metadata
+    - Always verify version claims by checking actual NuGet package contents, assembly references,
+      and the properties/items that feed into the task
+    - If something seems wrong, check the task inputs — the inputs tell you what RAR was actually given
+
+    ### Multi-TFM Awareness
+    For multi-targeting projects (net472 + net8.0, etc.):
+    - Each target framework gets its own "inner build" with separate properties and items
+    - Properties like `AppConfigFile`, `TargetFramework`, binding redirects may differ per inner build
+    - BUT some properties (like AppConfigFile) may incorrectly leak across TFMs — this is a common
+      source of bugs. MSBuild's RAR reads App.config for ALL frameworks, even net8.0 where binding
+      redirects don't apply at runtime
+    - Use `SearchBinlog` with TFM-specific queries to check per-framework values
 
     ## Understanding Build Structure
 
-    When analyzing performance or timing:
-    - **dirs.proj, *.sln, *.slnx files** are aggregation/traversal projects that orchestrate building many projects.
-      It's expected and correct that they span most or all of the build time - they're not bottlenecks themselves.
-    - Don't report these as "slow" - they're supposed to encompass the entire build.
-    - Instead, use GetProjectPerformance or GetProjectDependencies to find the actual slow projects underneath.
-    - Focus your performance analysis on real projects (*.csproj, *.vbproj, *.fsproj) not aggregators.
+    - **dirs.proj, *.sln, *.slnx files** are aggregation/traversal projects. They span the entire build
+      time by design — don't report these as slow. Focus on actual projects (*.csproj, *.vbproj, etc.).
+    - Use GetProjectPerformance or GetProjectDependencies to find real bottlenecks underneath aggregators.
 
     ## Your Investigation Process
-
-    For this binlog: {binlogPath}
 
     ### Phase 1: Understand the Build Outcome
     - Start with GetBuildSummary to understand success/failure, duration, scope
@@ -1023,22 +427,31 @@ static string GetAiDavidSystemPrompt(string binlogPath) => $"""
     - Use GetTargetExecutionReasons to understand target flow
     - Use GetSkippedTargets to see what DIDN'T run and why
 
-    ### Phase 3: Investigate "Why It Happened"
+    ### Phase 3: Deep Root Cause — "Why It Happened"
+    **Don't stop at the error message. Trace the data flow.**
+    - Use `AnalyzeTarget` on the target that produced the error to see task inputs/outputs
     - Use GetPropertyOrigin to trace important properties to their source files
+    - Use TraceProperty for the full evaluation history of a property
     - Use GetImportChain to understand the project structure and imports
+    - Use ListEmbeddedSourceFiles and GetEmbeddedSourceFile to read the actual project files
+      (.csproj, .props, .targets, Directory.Build.props, App.config, etc.) embedded in the binlog
+    - **When a task input references a file, READ THAT FILE.** Config files like App.config,
+      NuGet.config, and .props files often contain the real root cause.
     - Use SearchBinlog to find specific values or patterns
     - For incremental build issues, use GetIncrementalBuildAnalysis
 
-    ### Phase 4: Synthesize and Recommend
+    ### Phase 4: Verify Your Hypothesis
+    Before presenting a root cause, verify it:
+    - Does the data support your claim? Check the actual values in the binlog.
+    - Could there be a simpler explanation? Check config files and task inputs.
+    - If the error message says X depends on version Y, verify that's actually true — check the
+      assembly references, not just what the error reports.
+
+    ### Phase 5: Synthesize and Recommend
     - Connect the dots between symptoms and root causes
     - Provide specific, actionable fix recommendations
     - Explain the "why" behind each recommendation
-
-    ## Your Personality
-
-    You are knowledgeable, methodical, and genuinely helpful. You explain MSBuild concepts clearly
-    because you know most developers don't work with it daily. You don't just say what's wrong -
-    you explain WHY and HOW to fix it.
+    - Never recommend simply suppressing a warning/error without addressing the underlying cause
 
     ## Output Format
 
@@ -1051,17 +464,18 @@ static string GetAiDavidSystemPrompt(string binlogPath) => $"""
     [Factual description of the build execution, errors, key events]
 
     ## Why It Happened
-    [Root cause analysis - trace the issue back to its source]
+    [Root cause analysis — trace the issue back to its source using the actual project files and task inputs]
 
     ## Recommendations
-    [Specific, actionable steps to fix the issue]
+    [Specific, actionable steps to fix the issue, ordered by priority]
 
     ## Additional Observations (if relevant)
     [Performance issues, warnings worth addressing, other improvements]
 
     ---
 
-    Now analyze the build thoroughly. Be the debugging expert developers wish they had access to.
+    Be direct, specific, and actionable. Explain MSBuild concepts clearly.
+    You are the debugging expert developers wish they had access to.
     """;
 
 // ============================================================================
@@ -1071,53 +485,52 @@ static string GetAiDavidSystemPrompt(string binlogPath) => $"""
 static void PrintBanner()
 {
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"  {Colors.BrightCyan}{Colors.Bold}▐█▌ BinlogMCP{Colors.Reset} {Colors.Dim}───────────────────────────────────{Colors.Reset}");
-    Console.Error.WriteLine($"  {Colors.Yellow}🔨{Colors.Reset} {Colors.White}Build Log Investigator{Colors.Reset}");
-    Console.Error.WriteLine($"     {Colors.Dim}inspired by dfederm.com/debugging-msbuild{Colors.Reset}");
+    Console.Error.WriteLine($"  {BrightCyan}{Bold}▐█▌ BinlogMCP{Reset} {Dim}───────────────────────────────────{Reset}");
+    Console.Error.WriteLine($"  {Yellow}🔨{Reset} {White}Build Log Investigator{Reset}");
+    Console.Error.WriteLine($"     {Dim}inspired by dfederm.com/debugging-msbuild{Reset}");
     Console.Error.WriteLine();
 }
 
 static void PrintWelcome()
 {
-    Console.Error.WriteLine($"  {Colors.Dim}───────────────────────────────────────────────────{Colors.Reset}");
+    Console.Error.WriteLine($"  {Dim}───────────────────────────────────────────────────{Reset}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"  {Colors.White}Quick start:{Colors.Reset}");
+    Console.Error.WriteLine($"  {White}Quick start:{Reset}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"    {Colors.BrightGreen}[1]{Colors.Reset} {Colors.Green}diagnose{Colors.Reset}            Automated build analysis");
-    Console.Error.WriteLine($"    {Colors.BrightGreen}[2]{Colors.Reset} {Colors.Green}visualize timeline{Colors.Reset}  Gantt chart of execution");
-    Console.Error.WriteLine($"    {Colors.BrightGreen}[3]{Colors.Reset} {Colors.Green}visualize slowest{Colors.Reset}   Slowest targets chart");
-    Console.Error.WriteLine($"    {Colors.BrightGreen}[4]{Colors.Reset} {Colors.Green}help{Colors.Reset}                All commands");
+    Console.Error.WriteLine($"    {BrightGreen}[1]{Reset} {Green}diagnose{Reset}            Automated build analysis");
+    Console.Error.WriteLine($"    {BrightGreen}[2]{Reset} {Green}visualize timeline{Reset}  Gantt chart of execution");
+    Console.Error.WriteLine($"    {BrightGreen}[3]{Reset} {Green}visualize slowest{Reset}   Slowest targets chart");
+    Console.Error.WriteLine($"    {BrightGreen}[4]{Reset} {Green}help{Reset}                All commands");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"  {Colors.Dim}Or ask: \"Why did this build fail?\"{Colors.Reset}");
+    Console.Error.WriteLine($"  {Dim}Or ask: \"Why did this build fail?\"{Reset}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"  {Colors.Dim}───────────────────────────────────────────────────{Colors.Reset}");
+    Console.Error.WriteLine($"  {Dim}───────────────────────────────────────────────────{Reset}");
     Console.Error.WriteLine();
 }
 
 static void PrintHelp()
 {
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"{Colors.White}{Colors.Bold}Commands{Colors.Reset}");
-    Console.Error.WriteLine($"  {Colors.Green}diagnose{Colors.Reset}              Run automated AIDavid diagnosis");
-    Console.Error.WriteLine($"  {Colors.Green}clear{Colors.Reset}                 Clear conversation history");
-    Console.Error.WriteLine($"  {Colors.Green}log{Colors.Reset}                   Show log file path");
-    Console.Error.WriteLine($"  {Colors.Green}help{Colors.Reset}                  Show this help");
-    Console.Error.WriteLine($"  {Colors.Green}exit{Colors.Reset}                  Exit the program");
+    Console.Error.WriteLine($"{White}{Bold}Commands{Reset}");
+    Console.Error.WriteLine($"  {Green}diagnose{Reset}              Run automated AIDavid diagnosis");
+    Console.Error.WriteLine($"  {Green}help{Reset}                  Show this help");
+    Console.Error.WriteLine($"  {Green}log{Reset}                   Show log file path");
+    Console.Error.WriteLine($"  {Green}exit{Reset}                  Exit the program");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"{Colors.White}{Colors.Bold}Visualization{Colors.Reset}");
-    Console.Error.WriteLine($"  {Colors.Cyan}visualize timeline{Colors.Reset}    Gantt chart of build execution");
-    Console.Error.WriteLine($"  {Colors.Cyan}visualize slowest{Colors.Reset}     Bar chart of slowest targets");
-    Console.Error.WriteLine($"  {Colors.Cyan}visualize comparison{Colors.Reset}  Compare with baseline {Colors.Dim}(requires baseline){Colors.Reset}");
+    Console.Error.WriteLine($"{White}{Bold}Visualization{Reset}");
+    Console.Error.WriteLine($"  {Cyan}visualize timeline{Reset}    Gantt chart of build execution");
+    Console.Error.WriteLine($"  {Cyan}visualize slowest{Reset}     Bar chart of slowest targets");
+    Console.Error.WriteLine($"  {Cyan}visualize comparison{Reset}  Compare with baseline {Dim}(requires baseline){Reset}");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"{Colors.White}{Colors.Bold}Comparison{Colors.Reset}");
-    Console.Error.WriteLine($"  {Colors.Yellow}set baseline <path>{Colors.Reset}   Set a baseline binlog for comparison");
-    Console.Error.WriteLine($"  {Colors.Yellow}clear baseline{Colors.Reset}        Remove the baseline");
-    Console.Error.WriteLine($"  {Colors.Yellow}compare{Colors.Reset}               Compare current build with baseline");
+    Console.Error.WriteLine($"{White}{Bold}Comparison{Reset}");
+    Console.Error.WriteLine($"  {Yellow}set baseline <path>{Reset}   Set a baseline binlog for comparison");
+    Console.Error.WriteLine($"  {Yellow}clear baseline{Reset}        Remove the baseline");
+    Console.Error.WriteLine($"  {Yellow}compare{Reset}               Compare current build with baseline");
     Console.Error.WriteLine();
-    Console.Error.WriteLine($"{Colors.Dim}Or just ask a question about your build:{Colors.Reset}");
-    Console.Error.WriteLine($"{Colors.Dim}  \"Why did this build fail?\"");
+    Console.Error.WriteLine($"{Dim}Or just ask a question about your build:{Reset}");
+    Console.Error.WriteLine($"{Dim}  \"Why did this build fail?\"");
     Console.Error.WriteLine($"  \"What targets took the longest?\"");
-    Console.Error.WriteLine($"  \"Show me the errors\"{Colors.Reset}");
+    Console.Error.WriteLine($"  \"Show me the errors\"{Reset}");
     Console.Error.WriteLine();
 }
 
@@ -1126,30 +539,24 @@ static void PrintUsage()
     Console.Error.WriteLine("BinlogMCP - MSBuild Binary Log Analyzer");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Usage:");
-    Console.Error.WriteLine("  BinlogMcp.Client [binlog-path] [options]");
+    Console.Error.WriteLine("  BinlogMcp.Client [binlog-path]");
     Console.Error.WriteLine();
     Console.Error.WriteLine("If no binlog path is provided, you will be prompted to enter one.");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Options:");
-    Console.Error.WriteLine("  --mode, -m <mode>    Execution mode (default: fast)");
-    Console.Error.WriteLine("                       fast   - Use default model for everything");
-    Console.Error.WriteLine("                       hybrid - Use default model for tools, synthesis model for final analysis");
     Console.Error.WriteLine("  --help, -h           Show this help");
     Console.Error.WriteLine();
     Console.Error.WriteLine("Examples:");
     Console.Error.WriteLine("  BinlogMcp.Client ./build.binlog");
-    Console.Error.WriteLine("  BinlogMcp.Client ./build.binlog --mode hybrid");
     Console.Error.WriteLine("  BinlogMcp.Client");
     Console.Error.WriteLine();
-    Console.Error.WriteLine("Environment variables:");
-    Console.Error.WriteLine("  OPENAI_API_KEY          - Your OpenAI API key (required)");
-    Console.Error.WriteLine("  AIDAVID_MODE            - Default mode: fast or hybrid");
-    Console.Error.WriteLine("  OPENAI_MODEL            - Default model (default: gpt-4.1)");
-    Console.Error.WriteLine("  OPENAI_MODEL_SYNTHESIS  - Model for hybrid synthesis step (default: gpt-5-codex)");
+    Console.Error.WriteLine("Requirements:");
+    Console.Error.WriteLine("  Authenticate with GitHub CLI: gh auth login");
+    Console.Error.WriteLine("  The Copilot SDK uses your GitHub token for model access.");
 }
 
 // ============================================================================
-// Visualization commands
+// Visualization commands (direct MCP calls, bypassing LLM)
 // ============================================================================
 
 static async Task HandleVisualize(string vizType, string binlogPath, string? baselinePath, McpClient mcp, StatusDisplay statusDisplay)
@@ -1196,43 +603,38 @@ static async Task VisualizeTimeline(string binlogPath, McpClient mcp, StatusDisp
 {
     statusDisplay.ShowStatus("Generating timeline...");
 
-    // Get timeline data from MCP
     var args = new JsonObject { ["binlogPath"] = binlogPath, ["level"] = "targets" };
     var json = await mcp.CallToolAsync("GetTimeline", args);
 
     statusDisplay.ClearStatus();
 
-    // Parse and render
     var data = ChartRenderer.ParseTimelineJson(json, $"Build Timeline - {Path.GetFileName(binlogPath)}");
     var result = ChartRenderer.RenderAndOpenTimeline(data);
 
-    Console.Error.WriteLine($"{Colors.Green}Timeline saved:{Colors.Reset} {Colors.Dim}{result.FilePath}{Colors.Reset}");
-    Console.Error.WriteLine($"{Colors.Dim}Opening in browser...{Colors.Reset}");
+    Console.Error.WriteLine($"{Green}Timeline saved:{Reset} {Dim}{result.FilePath}{Reset}");
+    Console.Error.WriteLine($"{Dim}Opening in browser...{Reset}");
 }
 
 static async Task VisualizeSlowest(string binlogPath, McpClient mcp, StatusDisplay statusDisplay)
 {
     statusDisplay.ShowStatus("Analyzing performance...");
 
-    // Get target performance data
     var args = new JsonObject { ["binlogPath"] = binlogPath, ["top"] = 30 };
     var json = await mcp.CallToolAsync("GetTargets", args);
 
     statusDisplay.ClearStatus();
 
-    // Parse and render
     var data = ChartRenderer.ParsePerformanceJson(json, $"Slowest Targets - {Path.GetFileName(binlogPath)}", "targets");
     var result = ChartRenderer.RenderAndOpenBarChart(data);
 
-    Console.Error.WriteLine($"{Colors.Green}Chart saved:{Colors.Reset} {Colors.Dim}{result.FilePath}{Colors.Reset}");
-    Console.Error.WriteLine($"{Colors.Dim}Opening in browser...{Colors.Reset}");
+    Console.Error.WriteLine($"{Green}Chart saved:{Reset} {Dim}{result.FilePath}{Reset}");
+    Console.Error.WriteLine($"{Dim}Opening in browser...{Reset}");
 }
 
 static async Task VisualizeComparison(string currentPath, string baselinePath, McpClient mcp, StatusDisplay statusDisplay)
 {
     statusDisplay.ShowStatus("Comparing builds...");
 
-    // Get target performance for both builds
     var baselineArgs = new JsonObject { ["binlogPath"] = baselinePath, ["top"] = 30 };
     var currentArgs = new JsonObject { ["binlogPath"] = currentPath, ["top"] = 30 };
 
@@ -1241,7 +643,6 @@ static async Task VisualizeComparison(string currentPath, string baselinePath, M
 
     statusDisplay.ClearStatus();
 
-    // Parse and render comparison
     var data = ChartRenderer.ParseComparisonJson(
         baselineJson,
         currentJson,
@@ -1252,8 +653,8 @@ static async Task VisualizeComparison(string currentPath, string baselinePath, M
 
     var result = ChartRenderer.RenderAndOpenBarChart(data);
 
-    Console.Error.WriteLine($"{Colors.Green}Comparison saved:{Colors.Reset} {Colors.Dim}{result.FilePath}{Colors.Reset}");
-    Console.Error.WriteLine($"{Colors.Dim}Opening in browser...{Colors.Reset}");
+    Console.Error.WriteLine($"{Green}Comparison saved:{Reset} {Dim}{result.FilePath}{Reset}");
+    Console.Error.WriteLine($"{Dim}Opening in browser...{Reset}");
 }
 
 static (string command, string[] args)? FindMcpServer()

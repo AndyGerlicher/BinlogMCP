@@ -1,0 +1,3 @@
+<!-- Intentionally empty — blocks root Directory.Build.props from affecting test fixture projects. -->
+<Project>
+</Project>
