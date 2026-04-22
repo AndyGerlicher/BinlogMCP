@@ -178,11 +178,27 @@ public static partial class BinlogTools
         [Description("Path to the MSBuild source file (.csproj, .props, .targets, etc.)")] string sourceFile,
         [Description("The old (incorrect) path value to find")] string oldValue,
         [Description("The new (correct) path value to replace with")] string newValue,
+        [Description("Repository root - if specified, only files under this directory can be modified (safety guard against editing SDK/NuGet files)")] string? repoRoot = null,
         [Description("Property or item name to scope the fix (optional - if provided, only fixes within that element)")] string? elementName = null,
         [Description("Dry run - report what would change without modifying the file (default: true)")] bool dryRun = true)
     {
         var validationError = ValidateFileExists(sourceFile);
         if (validationError != null) return validationError;
+
+        // Safety guard: reject files outside repo root
+        if (!string.IsNullOrEmpty(repoRoot))
+        {
+            var fullSource = Path.GetFullPath(sourceFile);
+            var fullRoot = Path.GetFullPath(repoRoot);
+            if (!fullSource.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    error = $"Source file is outside the repo root. File: {fullSource}, RepoRoot: {fullRoot}. " +
+                            "This is a safety guard to prevent modifying SDK, NuGet, or other external files."
+                }, JsonOptions);
+            }
+        }
 
         try
         {

@@ -105,6 +105,22 @@ public class CasingToolsTests : IDisposable
     }
 
     [Fact]
+    public void FixCasingMismatch_OutsideRepoRoot_ReturnsError()
+    {
+        var testFile = Path.Combine(_tempDir, "Test.csproj");
+        File.WriteAllText(testFile, "<Project />");
+
+        var result = BinlogTools.FixCasingMismatch(
+            testFile,
+            oldValue: @"src\controllers",
+            newValue: @"src\Controllers",
+            repoRoot: @"C:\some\other\repo");
+        var json = JsonDocument.Parse(result);
+        Assert.True(json.RootElement.TryGetProperty("error", out var error));
+        Assert.Contains("outside the repo root", error.GetString());
+    }
+
+    [Fact]
     public void FixCasingMismatch_IdenticalValues_ReturnsNoChange()
     {
         var testFile = Path.Combine(_tempDir, "Test.csproj");
