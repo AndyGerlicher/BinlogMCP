@@ -162,17 +162,21 @@ public class CasingAnalyzerTests : IDisposable
     [Fact]
     public async Task FixFile_PreservesPathStructure()
     {
-        // Arrange: Create a test file with paths
-        var testFile = Path.Combine(_tempDir, "Test.csproj");
+        // Arrange: Create a test file in a subdirectory so ..\ paths resolve within the temp dir
+        var subDir = Path.Combine(_tempDir, "App");
+        Directory.CreateDirectory(subDir);
+        var testFile = Path.Combine(subDir, "Test.csproj");
         var content = @"<Project>
-  <Import Project=""..\shared\Shared.props"" />
+  <Import Project=""..\Shared\Shared.props"" />
   <ItemGroup>
-    <ProjectReference Include=""..\librarya\LibraryA.csproj"" />
+    <ProjectReference Include=""..\LibraryA\LibraryA.csproj"" />
   </ItemGroup>
 </Project>";
+        // Write with incorrect casing
+        content = content.Replace("Shared", "shared").Replace("LibraryA", "librarya");
         await File.WriteAllTextAsync(testFile, content);
 
-        // Create the directories so the resolver knows the canonical casing
+        // Create the sibling directories with correct casing so the resolver can find them
         Directory.CreateDirectory(Path.Combine(_tempDir, "Shared"));
         Directory.CreateDirectory(Path.Combine(_tempDir, "LibraryA"));
 
