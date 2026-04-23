@@ -102,9 +102,56 @@ var session = await copilot.CreateSessionAsync(new SessionConfig
     {
         OnPreToolUse = (input, _) =>
         {
-            Logger.LogToolCall(input.ToolName, input.ToolArgs?.ToString() ?? "{}");
+            var toolName = input.ToolName;
+            var toolArgs = input.ToolArgs?.ToString() ?? "{}";
+            Logger.LogToolCall(toolName, toolArgs);
             Interlocked.Increment(ref toolCallCount);
             statusDisplay.ShowStatus();
+
+            // Block dangerous built-in tools that modify the filesystem
+            var blockedTools = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "editFile", "edit_file", "writeFile", "write_file", "createFile", "create_file",
+                "deleteFile", "delete_file", "renameFile", "rename_file", "moveFile", "move_file",
+                "bash", "shell", "execute", "run_command", "terminal",
+                "create_or_update_file", "push_files"
+            };
+
+            if (blockedTools.Contains(toolName))
+            {
+                Logger.LogWarning($"[BLOCKED] Tool '{toolName}' blocked — filesystem modification not allowed");
+                Console.Error.WriteLine($"  {Yellow}⚠  Blocked:{Reset} {toolName} — filesystem modification not allowed");
+                return Task.FromResult<PreToolUseHookOutput?>(
+                    new PreToolUseHookOutput { PermissionDecision = "deny" });
+            }
+
+            // Log FixCasingMismatch calls prominently to console
+            if (toolName.Equals("FixCasingMismatch", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var argsNode = JsonNode.Parse(toolArgs);
+                    var sourceFile = argsNode?["sourceFile"]?.ToString() ?? "unknown";
+                    var isDryRun = argsNode?["dryRun"]?.ToString() != "false";
+                    var repoRoot = argsNode?["repoRoot"]?.ToString();
+
+                    if (isDryRun)
+                    {
+                        Console.Error.WriteLine($"  {Dim}🔍 Dry run: {sourceFile}{Reset}");
+                    }
+                    else
+                    {
+                        Console.Error.WriteLine($"  {Yellow}⚠  Modifying: {sourceFile}{Reset}");
+                        if (string.IsNullOrEmpty(repoRoot))
+                        {
+                            Logger.LogWarning($"FixCasingMismatch called without repoRoot on file: {sourceFile}");
+                            Console.Error.WriteLine($"  {Yellow}⚠  Warning: no repoRoot specified — safety guard inactive{Reset}");
+                        }
+                    }
+                }
+                catch { /* args parsing failed — already logged to file */ }
+            }
+
             return Task.FromResult<PreToolUseHookOutput?>(
                 new PreToolUseHookOutput { PermissionDecision = "allow" });
         },
@@ -112,6 +159,44 @@ var session = await copilot.CreateSessionAsync(new SessionConfig
         {
             var resultPreview = input.ToolResult?.ToString() ?? "";
             Logger.LogToolResult(input.ToolName, resultPreview.Length > 200 ? resultPreview[..200] : resultPreview);
+
+            // Log FixCasingMismatch results to console
+            if (input.ToolName.Equals("FixCasingMismatch", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var argsNode = JsonNode.Parse(input.ToolArgs?.ToString() ?? "{}");
+                    var sourceFile = argsNode?["sourceFile"]?.ToString() ?? "unknown";
+
+                    var resultJson = System.Text.Json.JsonDocument.Parse(resultPreview);
+                    var root = resultJson.RootElement;
+                    if (root.TryGetProperty("result", out var resultProp))
+                    {
+                        var resultStr = resultProp.GetString();
+                        if (resultStr == "fixed" && root.TryGetProperty("replacementCount", out var count))
+                        {
+                            Console.Error.WriteLine($"  {Green}✓  Fixed {count.GetInt32()} occurrence(s) in {Path.GetFileName(sourceFile)}{Reset}");
+                        }
+                        else if (resultStr == "dry_run" && root.TryGetProperty("replacementCount", out var dryCount))
+                        {
+                            Console.Error.WriteLine($"  {Dim}   Would fix {dryCount.GetInt32()} occurrence(s){Reset}");
+                        }
+                        else if (resultStr == "not_found")
+                        {
+                            Console.Error.WriteLine($"  {Dim}   No match found in {Path.GetFileName(sourceFile)}{Reset}");
+                        }
+                    }
+                    else if (root.TryGetProperty("error", out var errorProp))
+                    {
+                        Console.Error.WriteLine($"  {Red}✗  Error: {errorProp.GetString()}{Reset}");
+                    }
+                }
+                catch
+                {
+                    // Couldn't parse result — already logged to file
+                }
+            }
+
             return Task.FromResult<PostToolUseHookOutput?>(null);
         },
     },
@@ -476,6 +561,21 @@ static string GetSystemPrompt(string binlogPath) => $"""
 
     Be direct, specific, and actionable. Explain MSBuild concepts clearly.
     You are the debugging expert developers wish they had access to.
+
+    ## CRITICAL SAFETY RULES — File Modification
+
+    You have access to `FixCasingMismatch` which can modify MSBuild source files. Follow these rules strictly:
+
+    1. **NEVER rename, move, or delete files on disk.** You may only modify file *contents* using `FixCasingMismatch`.
+       Do not use any tool to rename files, move files, or change file/directory names on the filesystem.
+    2. **NEVER modify files outside the repository root.** Do not touch SDK files, NuGet packages, .dotnet folders,
+       or any path outside the user's repo. Always pass the `repoRoot` parameter to `FixCasingMismatch`.
+    3. **Always call `FixCasingMismatch` with `dryRun: true` first.** Show the user what would change and get
+       confirmation before applying. Only then call again with `dryRun: false`.
+    4. **Always pass `repoRoot` to both `GetCasingMismatches` and `FixCasingMismatch`** to ensure only repo-local
+       paths are analyzed and only repo-local files are modified.
+    5. **Only fix what the binlog data proves is wrong.** Don't guess at fixes — trace each mismatch to its
+       definition site using `GetPropertyOrigin` or similar tools before deciding to fix it.
     """;
 
 // ============================================================================
