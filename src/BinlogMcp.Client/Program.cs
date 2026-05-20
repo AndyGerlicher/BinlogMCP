@@ -704,7 +704,7 @@ static async Task VisualizeTimeline(string binlogPath, McpClient mcp, StatusDisp
     statusDisplay.ShowStatus("Generating timeline...");
 
     var args = new JsonObject { ["binlogPath"] = binlogPath, ["level"] = "targets" };
-    var json = await mcp.CallToolAsync("GetTimeline", args);
+    var json = await mcp.CallToolAsync("get_timeline", args);
 
     statusDisplay.ClearStatus();
 
@@ -720,7 +720,7 @@ static async Task VisualizeSlowest(string binlogPath, McpClient mcp, StatusDispl
     statusDisplay.ShowStatus("Analyzing performance...");
 
     var args = new JsonObject { ["binlogPath"] = binlogPath, ["top"] = 30 };
-    var json = await mcp.CallToolAsync("GetTargets", args);
+    var json = await mcp.CallToolAsync("get_targets", args);
 
     statusDisplay.ClearStatus();
 
@@ -738,8 +738,8 @@ static async Task VisualizeComparison(string currentPath, string baselinePath, M
     var baselineArgs = new JsonObject { ["binlogPath"] = baselinePath, ["top"] = 30 };
     var currentArgs = new JsonObject { ["binlogPath"] = currentPath, ["top"] = 30 };
 
-    var baselineJson = await mcp.CallToolAsync("GetTargets", baselineArgs);
-    var currentJson = await mcp.CallToolAsync("GetTargets", currentArgs);
+    var baselineJson = await mcp.CallToolAsync("get_targets", baselineArgs);
+    var currentJson = await mcp.CallToolAsync("get_targets", currentArgs);
 
     statusDisplay.ClearStatus();
 

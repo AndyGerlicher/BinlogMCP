@@ -20,19 +20,19 @@ public class ClientServicesTests
         {
             var result = toolName switch
             {
-                "GetTimeline" => BinlogTools.GetTimeline(
+                "get_timeline" => BinlogTools.GetTimeline(
                     arguments["binlogPath"]?.GetValue<string>() ?? "",
                     level: arguments["level"]?.GetValue<string>() ?? "targets"),
 
-                "GetTargets" => BinlogTools.GetTargets(
+                "get_targets" => BinlogTools.GetTargets(
                     arguments["binlogPath"]?.GetValue<string>() ?? "",
                     limit: arguments["top"]?.GetValue<int>() ?? 50),
 
-                "CompareBinlogs" => BinlogTools.CompareBinlogs(
+                "compare_binlogs" => BinlogTools.CompareBinlogs(
                     arguments["baselinePath"]?.GetValue<string>() ?? "",
                     arguments["comparisonPath"]?.GetValue<string>() ?? ""),
 
-                "GetIncrementalBuildAnalysis" => BinlogTools.GetIncrementalBuildAnalysis(
+                "get_incremental_build_analysis" => BinlogTools.GetIncrementalBuildAnalysis(
                     arguments["binlogPath"]?.GetValue<string>() ?? ""),
 
                 _ => throw new NotSupportedException($"Tool {toolName} not supported in tests")

@@ -27,7 +27,7 @@ public class BuildComparisonService
             ["comparisonPath"] = currentPath
         };
 
-        var json = await _toolCaller.CallToolAsync("CompareBinlogs", args);
+        var json = await _toolCaller.CallToolAsync("compare_binlogs", args);
         return ParseComparisonResult(json);
     }
 
@@ -37,7 +37,7 @@ public class BuildComparisonService
     public async Task<IncrementalAnalysisResult> GetIncrementalAnalysisAsync(string binlogPath)
     {
         var args = new JsonObject { ["binlogPath"] = binlogPath };
-        var json = await _toolCaller.CallToolAsync("GetIncrementalBuildAnalysis", args);
+        var json = await _toolCaller.CallToolAsync("get_incremental_build_analysis", args);
         return ParseIncrementalAnalysis(json);
     }
 

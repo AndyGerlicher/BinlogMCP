@@ -22,7 +22,7 @@ public class VisualizationService
     public async Task<TimelineData> GetTimelineDataAsync(string binlogPath, string level = "targets")
     {
         var args = new JsonObject { ["binlogPath"] = binlogPath, ["level"] = level };
-        var json = await _toolCaller.CallToolAsync("GetTimeline", args);
+        var json = await _toolCaller.CallToolAsync("get_timeline", args);
 
         return ChartRenderer.ParseTimelineJson(json, $"Build Timeline - {Path.GetFileName(binlogPath)}");
     }
@@ -33,7 +33,7 @@ public class VisualizationService
     public async Task<BarChartData> GetPerformanceDataAsync(string binlogPath, int top = 30)
     {
         var args = new JsonObject { ["binlogPath"] = binlogPath, ["top"] = top };
-        var json = await _toolCaller.CallToolAsync("GetTargets", args);
+        var json = await _toolCaller.CallToolAsync("get_targets", args);
 
         return ChartRenderer.ParsePerformanceJson(json, $"Slowest Targets - {Path.GetFileName(binlogPath)}", "targets");
     }
@@ -46,8 +46,8 @@ public class VisualizationService
         var baselineArgs = new JsonObject { ["binlogPath"] = baselinePath, ["top"] = top };
         var currentArgs = new JsonObject { ["binlogPath"] = currentPath, ["top"] = top };
 
-        var baselineJson = await _toolCaller.CallToolAsync("GetTargets", baselineArgs);
-        var currentJson = await _toolCaller.CallToolAsync("GetTargets", currentArgs);
+        var baselineJson = await _toolCaller.CallToolAsync("get_targets", baselineArgs);
+        var currentJson = await _toolCaller.CallToolAsync("get_targets", currentArgs);
 
         return ChartRenderer.ParseComparisonJson(
             baselineJson,
