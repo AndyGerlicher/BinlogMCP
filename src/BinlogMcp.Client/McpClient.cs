@@ -107,7 +107,14 @@ public sealed class McpClient : IAsyncDisposable
             while (!ct.IsCancellationRequested)
             {
                 var line = await reader.ReadLineAsync(ct);
-                if (line == null) break; // EOF
+                if (line == null)
+                {
+                    // EOF - server closed stdout (e.g., crashed or exited early).
+                    // Fail any pending requests so callers don't hang forever.
+                    FailAllPendingRequests(new InvalidOperationException(
+                        "MCP server closed its stdout before responding. The server may have crashed or exited early."));
+                    break;
+                }
 
                 try
                 {
@@ -155,13 +162,17 @@ public sealed class McpClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            // Fail all pending requests on read loop error
-            foreach (var kvp in _pendingRequests)
+            FailAllPendingRequests(ex);
+        }
+    }
+
+    private void FailAllPendingRequests(Exception ex)
+    {
+        foreach (var kvp in _pendingRequests)
+        {
+            if (_pendingRequests.TryRemove(kvp.Key, out var tcs))
             {
-                if (_pendingRequests.TryRemove(kvp.Key, out var tcs))
-                {
-                    tcs.TrySetException(ex);
-                }
+                tcs.TrySetException(ex);
             }
         }
     }

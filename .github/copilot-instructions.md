@@ -4,12 +4,10 @@
 
 ```bash
 dotnet build                                    # Build all projects
-dotnet test tests/BinlogMcp.Tests               # Run unit tests (~293 tests)
+dotnet test tests/BinlogMcp.Tests               # Run unit tests
 dotnet test tests/BinlogMcp.Tests --filter "FullyQualifiedName~GetBuildSummary"  # Run single test class
 dotnet test tests/BinlogMcp.Tests --filter "DisplayName~GetBuildSummary_RealBinlog"  # Run single test
 ```
-
-Integration tests (`tests/BinlogMcp.IntegrationTests`) call OpenAI and cost money — only run when explicitly needed. They require `OPENAI_API_KEY` or user secrets.
 
 ## Build System
 
@@ -29,13 +27,12 @@ The `test-data/` directory has empty `Directory.Build.props` and `Directory.Pack
 
 ## Architecture
 
-This is an MCP (Model Context Protocol) server that exposes 52 tools for analyzing MSBuild binary log files (.binlog). It targets .NET 10.
+This is an MCP (Model Context Protocol) server that exposes 54 tools for analyzing MSBuild binary log files (.binlog). It targets .NET 10.
 
 **Projects:**
 - `src/BinlogMcp` — The MCP server. Uses stdio transport, auto-discovers tools via `WithToolsFromAssembly()`.
 - `src/BinlogMcp.Client` — Interactive REPL that wraps the MCP server as a subprocess and drives it with the GitHub Copilot SDK. Top-level statements in `Program.cs`.
 - `src/BinlogMcp.Visualization` — HTML/JS chart rendering (Gantt timelines, bar charts) opened in-browser.
-- `src/BinlogMcp.CasingAnalyzer` — Standalone CLI to fix path casing in MSBuild source files.
 
 **Key design: All MCP tools are static methods on `BinlogTools`**, a single `partial class` split across files by domain:
 - `BinlogTools.cs` — Core tools (summary, errors, warnings) + all shared helpers
@@ -51,6 +48,7 @@ This is an MCP (Model Context Protocol) server that exposes 52 tools for analyzi
 - `BinlogTools.Environment.cs` — Env vars, timeline export
 - `BinlogTools.Evaluation.cs` — Flattened project view
 - `BinlogTools.Sources.cs` — Embedded source file access
+- `BinlogTools.Casing.cs` — Path casing mismatch detection and XML-aware fixes
 
 ## Conventions
 

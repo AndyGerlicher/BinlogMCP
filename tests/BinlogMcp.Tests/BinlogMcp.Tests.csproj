@@ -13,7 +13,6 @@
     <ProjectReference Include="..\..\src\BinlogMcp\BinlogMcp.csproj" />
     <ProjectReference Include="..\..\src\BinlogMcp.Visualization\BinlogMcp.Visualization.csproj" />
     <ProjectReference Include="..\..\src\BinlogMcp.Client\BinlogMcp.Client.csproj" />
-    <ProjectReference Include="..\..\src\BinlogMcp.CasingAnalyzer\BinlogMcp.CasingAnalyzer.csproj" />
   </ItemGroup>
 
   <ItemGroup>

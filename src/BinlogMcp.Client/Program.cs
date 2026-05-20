@@ -771,7 +771,11 @@ static (string command, string[] args)? FindMcpServer()
         var dir = new DirectoryInfo(startDir!);
         while (dir != null)
         {
-            // First try to find a built executable (faster, no dotnet output noise)
+            // Look for a built executable. We intentionally do NOT fall back to
+            // `dotnet run --no-build` here: if the server isn't built, that command
+            // would exit silently and McpClient.InitializeAsync would hang forever
+            // waiting for a JSON-RPC response. Better to fail fast with a clear
+            // error from the caller telling the user to run `dotnet build`.
             var exePath = Path.Combine(dir.FullName, "src", "BinlogMcp", "bin", "Release", "net10.0", "BinlogMcp.exe");
             if (File.Exists(exePath))
             {
@@ -783,13 +787,6 @@ static (string command, string[] args)? FindMcpServer()
             if (File.Exists(exePath))
             {
                 return (exePath, []);
-            }
-
-            // Fall back to dotnet run (slower, may have output noise)
-            var projectPath = Path.Combine(dir.FullName, "src", "BinlogMcp", "BinlogMcp.csproj");
-            if (File.Exists(projectPath))
-            {
-                return ("dotnet", ["run", "--project", projectPath, "--no-build", "-c", "Release"]);
             }
 
             dir = dir.Parent;

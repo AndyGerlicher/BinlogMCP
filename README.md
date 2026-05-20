@@ -4,7 +4,7 @@ An MCP (Model Context Protocol) server for reading and analyzing MSBuild binary 
 
 ## Overview
 
-This server exposes 52 tools that allow AI assistants to analyze MSBuild binary logs, including:
+This server exposes 54 tools that allow AI assistants to analyze MSBuild binary logs, including:
 
 - **Build Info** - Summaries, errors, warnings, properties, items
 - **Performance** - Slowest targets/tasks, compiler timing, parallelism analysis, I/O bottlenecks
@@ -82,16 +82,14 @@ The client maintains conversation history, so you can ask follow-up questions th
 
 Requires GitHub CLI authentication (`gh auth login`) for Copilot SDK model access.
 
-### Casing Analyzer
+### Casing Analysis
 
-Fixes path casing in MSBuild source files. On Windows, incorrect casing in paths (e.g., `..\librarya\` instead of `..\LibraryA\`) can cause cache issues with NuGet and other tools.
+Detects and fixes path casing mismatches in MSBuild source files. On Windows, incorrect casing in paths (e.g., `..\librarya\` instead of `..\LibraryA\`) can cause cache issues with NuGet and other tools.
 
-```bash
-# Fix casing in all .props, .targets, *proj files in a repo
-dotnet run --project src/BinlogMcp.CasingAnalyzer -- /path/to/repo
-```
+Exposed as MCP tools — invoke them through the Client (e.g., ask "fix the casing issues in this binlog") or any MCP host:
 
-The tool walks the filesystem to get canonical casing (disk is the source of truth), then fixes any path segments in source files that don't match.
+- `GetCasingMismatches` — scans a binlog for paths whose casing doesn't match disk and returns the definition site (source file + property/item) for each.
+- `FixCasingMismatch` — applies an XML-aware fix to a specific source file. Supports `dryRun` and a `repoRoot` safety guard that blocks edits outside the repo.
 
 ## Requirements
 
@@ -114,21 +112,11 @@ dotnet run --project src/BinlogMcp
 ## Testing
 
 ```bash
-# Run unit tests (~293 tests)
+# Run unit tests
 dotnet test tests/BinlogMcp.Tests
-
-# Run LLM integration tests (requires OpenAI API key, costs money - run sparingly)
-dotnet test tests/BinlogMcp.IntegrationTests
 ```
 
-Integration tests require an OpenAI API key. Configure via user secrets:
-```bash
-dotnet user-secrets set "OpenAI:ApiKey" "sk-..." --project tests/BinlogMcp.IntegrationTests
-```
-
-Or via environment variable: `OPENAI_API_KEY`. Tests skip automatically if no key is configured.
-
-The interactive client (BinlogMcp.Client) uses the GitHub Copilot SDK instead and requires `gh auth login`.
+The interactive client (BinlogMcp.Client) uses the GitHub Copilot SDK and requires `gh auth login`.
 
 ## MCP Configuration
 
