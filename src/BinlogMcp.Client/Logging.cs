@@ -31,7 +31,6 @@ public static class Logger
                 FileName = LogFilePath,
                 Layout = "${longdate} | ${level:uppercase=true:padding=-5} | ${message}${onexception:${newline}${exception:format=tostring}}",
                 KeepFileOpen = false,  // More reliable on Windows
-                ConcurrentWrites = true,
                 AutoFlush = true
             };
 
