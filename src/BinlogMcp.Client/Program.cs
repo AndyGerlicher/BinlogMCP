@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 using BinlogMcp.Client;
 using BinlogMcp.Visualization;
 using static BinlogMcp.Client.Colors;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 
 // Parse command line arguments
 var argsList = args.ToList();
@@ -356,7 +356,7 @@ static async Task<(long inputTokens, long outputTokens, long cacheReadTokens, lo
     long totalCacheReadTokens = 0;
     long totalCacheWriteTokens = 0;
 
-    session.On(evt =>
+    session.On<SessionEvent>(evt =>
     {
         switch (evt)
         {

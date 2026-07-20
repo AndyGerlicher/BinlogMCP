@@ -14,4 +14,75 @@
     <ProjectReference Include="..\BinlogMcp.Visualization\BinlogMcp.Visualization.csproj" />
   </ItemGroup>
 
+  <!-- ===========================================================================
+       Copilot CLI download from GitHub Releases instead of npm.
+
+       GitHub.Copilot.SDK's build targets download the CLI binary from the public npm
+       registry (registry.npmjs.org/@github/copilot-*), which is blocked by policy here.
+       We opt out of the SDK's npm download (CopilotSkipCliDownload=true, which also
+       disables the SDK's output-copy targets) and instead fetch the equivalent binary
+       for the build host's RID from the github/copilot-cli GitHub Releases, staging it
+       under runtimes/<rid>/native/ where the SDK locates it at runtime.
+
+       The GitHub release tag (v<CopilotCliVersion>) matches the npm CLI version pinned
+       by GitHub.Copilot.SDK.props, so keep the GitHub.Copilot.SDK package and this in
+       sync automatically via $(CopilotCliVersion). Unlike the packaging setup in
+       BuildErrorRemediator, this is a local tool, so we download only the build host's
+       RID and skip all nupkg/Pack concerns.
+       =========================================================================== -->
+  <PropertyGroup>
+    <CopilotSkipCliDownload>true</CopilotSkipCliDownload>
+    <CopilotCliGitHubReleasesUrl Condition="'$(CopilotCliGitHubReleasesUrl)' == ''">https://github.com/github/copilot-cli/releases/download</CopilotCliGitHubReleasesUrl>
+  </PropertyGroup>
+
+  <!-- _CopilotPlatform / _CopilotRid / _CopilotBinary are computed by
+       GitHub.Copilot.SDK.targets, which is imported AFTER this csproj body, so they are
+       only resolvable inside a target (execution time), never in a body PropertyGroup. -->
+  <Target Name="_DownloadCopilotCliFromGitHub"
+          BeforeTargets="BeforeBuild;GetCopyToOutputDirectoryItems"
+          Condition="'$(TargetFramework)' != '' And '$(_CopilotPlatform)' != ''">
+    <Error Condition="'$(CopilotCliVersion)' == ''"
+           Text="CopilotCliVersion is not set. The GitHub.Copilot.SDK.props file may be missing from the NuGet package." />
+    <PropertyGroup>
+      <_GitHubReleasesUrl>$([System.String]::Copy('$(CopilotCliGitHubReleasesUrl)').TrimEnd('/'))</_GitHubReleasesUrl>
+      <_CopilotIsWin>$(_CopilotRid.StartsWith('win-'))</_CopilotIsWin>
+      <_CopilotArchiveExt Condition="'$(_CopilotIsWin)' == 'true'">zip</_CopilotArchiveExt>
+      <_CopilotArchiveExt Condition="'$(_CopilotArchiveExt)' == ''">tar.gz</_CopilotArchiveExt>
+      <_CopilotCliCacheDir>$(IntermediateOutputPath)copilot-cli\$(CopilotCliVersion)\$(_CopilotPlatform)</_CopilotCliCacheDir>
+      <_CopilotArchivePath>$(_CopilotCliCacheDir)\copilot.$(_CopilotArchiveExt)</_CopilotArchivePath>
+      <_CopilotCliBinaryPath>$(_CopilotCliCacheDir)\$(_CopilotBinary)</_CopilotCliBinaryPath>
+      <_CopilotDownloadUrl>$(_GitHubReleasesUrl)/v$(CopilotCliVersion)/copilot-$(_CopilotPlatform).$(_CopilotArchiveExt)</_CopilotDownloadUrl>
+    </PropertyGroup>
+
+    <!-- Delete a stale/partial archive if the extracted binary is missing. -->
+    <Delete Files="$(_CopilotArchivePath)" Condition="!Exists('$(_CopilotCliBinaryPath)') And Exists('$(_CopilotArchivePath)')" />
+
+    <MakeDir Directories="$(_CopilotCliCacheDir)" Condition="!Exists('$(_CopilotCliBinaryPath)')" />
+    <Message Importance="high"
+             Text="Downloading Copilot CLI $(CopilotCliVersion) for $(_CopilotPlatform) from GitHub Releases..."
+             Condition="!Exists('$(_CopilotCliBinaryPath)')" />
+    <DownloadFile SourceUrl="$(_CopilotDownloadUrl)"
+                  DestinationFolder="$(_CopilotCliCacheDir)"
+                  DestinationFileName="copilot.$(_CopilotArchiveExt)"
+                  Condition="!Exists('$(_CopilotCliBinaryPath)')" />
+
+    <!-- Windows assets are .zip; all others are .tar.gz. -->
+    <Unzip SourceFiles="$(_CopilotArchivePath)"
+           DestinationFolder="$(_CopilotCliCacheDir)"
+           OverwriteReadOnlyFiles="true"
+           Condition="'$(_CopilotIsWin)' == 'true' And !Exists('$(_CopilotCliBinaryPath)')" />
+    <Exec Command="tar -xzf &quot;$(_CopilotArchivePath)&quot; -C &quot;$(_CopilotCliCacheDir)&quot;"
+          Condition="'$(_CopilotIsWin)' != 'true' And !Exists('$(_CopilotCliBinaryPath)')" />
+
+    <Error Condition="!Exists('$(_CopilotCliBinaryPath)')"
+           Text="Copilot CLI binary not found at '$(_CopilotCliBinaryPath)' after download/extract from $(_CopilotDownloadUrl)." />
+
+    <!-- Stage under runtimes/<rid>/native/ so the SDK finds it at runtime. -->
+    <ItemGroup>
+      <ContentWithTargetPath Include="$(_CopilotCliBinaryPath)"
+                             TargetPath="runtimes\$(_CopilotRid)\native\$(_CopilotBinary)"
+                             CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
 </Project>
